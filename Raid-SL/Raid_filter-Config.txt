@@ -1,0 +1,25 @@
+# SET | CODE | TIER | QTD | [TOPROW min-max]
+
+# Sustentação
+Bolster        | 51 | SUPER-ENDGAME | 5 | TOPROW 3-7
+Regeneration   | 15 | ENDGAME       | 5 | TOPROW 3-7
+Immortal_DEF   | 30 | ENDGAME       | 3 | TOPROW 2-6
+Immortal_HYB   | 30 | ENDGAME       | 3 | TOPROW 2-6
+Destroy_OFF    | 24 | ENDGAME       | 3 | TOPROW 3-7
+
+# Controle
+Provoke_DEF    | 23 | SUPER-ENDGAME | 3 | TOPROW 2-6
+Stun_HYB       | 21 | SUPER-ENDGAME | 3 | TOPROW 2-6
+Stun_DEF       | 21 | SUPER-ENDGAME | 3 | TOPROW 2-6
+Stun_OFF       | 21 | SUPER-ENDGAME | 3 | TOPROW 2-6
+
+# Dano
+Lethal_OFF     | 46 | SUPER-ENDGAME | 8 | TOPROW 4-12
+Savage_OFF     | 19 | ENDGAME       | 8 | TOPROW 4-12
+StoneSkin_DEF  | 48 | ENDGAME       | 5 | TOPROW 3-7
+StoneSkin_OFF  | 48 | SUPER-ENDGAME | 5 | TOPROW 3-7
+StoneSkin_HYB  | 48 | ENDGAME       | 3 | TOPROW 2-6
+
+# Defaults:
+# - Sem sufixo ⇒ perfil DEF
+# - Sem "TOPROW" ⇒ usamos TOPROW 3-7 (default global)
