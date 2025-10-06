@@ -11,7 +11,7 @@
     subBlockSel: '.artifact_substat_container .artifact_substat',
     ratingNowSel: '.artifact_rating > :first-child',
     ratingMaxSel: '.artifact_rating .artifact_rating_maximum',
-    scrollStep: 600,         // px por tick
+    scrollStep: 800,         // px por tick
     tickMs: 180,             // intervalo entre rolagens
     idleCyclesToStop: 10,    // para automaticamente se não aparecerem itens novos
     debug: false
@@ -24,7 +24,6 @@
     timer: null,
     data: new Map(), // id -> item
     seen: new Set(),
-    lastCount: 0,
     idleCycles: 0,
     hud: null
   });
@@ -34,16 +33,45 @@
   const qa = (sel, el=document) => Array.from(el.querySelectorAll(sel));
   const text = el => (el ? el.textContent.trim() : '');
 
-  function findScrollContainer() {
-    // tenta achar um container virtualizado; se não achar, usa window
+  // --- viewport detection (prioriza Angular CDK) ---
+  function getViewport() {
+    // 1) Angular CDK
+    const vps = Array.from(document.querySelectorAll('.cdk-virtual-scroll-viewport'))
+      .filter(el => el.offsetParent !== null);
+    if (vps.length) {
+      // maior visível
+      return vps.sort((a,b)=>b.clientHeight - a.clientHeight)[0];
+    }
+    // 2) Maior container rolável visível
     const candidates = qa('*').filter(el => {
       const s = getComputedStyle(el);
-      const overY = s.overflowY;
-      return (overY === 'auto' || overY === 'scroll') && el.scrollHeight > el.clientHeight && el.clientHeight > 300;
-    });
-    // prioriza o maior
-    candidates.sort((a,b)=>b.clientHeight - a.clientHeight);
+      return (s.overflowY === 'auto' || s.overflowY === 'scroll') &&
+             el.scrollHeight > el.clientHeight && el.clientHeight > 300 &&
+             el.offsetParent !== null;
+    }).sort((a,b)=>b.clientHeight - a.clientHeight);
     return candidates[0] || document.scrollingElement || document.body;
+  }
+
+  // --- rolagem robusta para CDK ---
+  function doScroll(vp, step) {
+    const before = vp.scrollTop;
+    // tentativa 1: scrollTop direto
+    vp.scrollTop = before + step;
+
+    // tentativa 2: wheel (CDK costuma escutar wheel)
+    setTimeout(() => {
+      if (vp.scrollTop === before) {
+        vp.dispatchEvent(new WheelEvent('wheel', {deltaY: step, bubbles: true, cancelable: true}));
+      }
+    }, 20);
+
+    // tentativa 3: PageDown com foco
+    setTimeout(() => {
+      if (vp.scrollTop === before) {
+        vp.focus?.();
+        vp.dispatchEvent(new KeyboardEvent('keydown', {key: 'PageDown', code: 'PageDown', bubbles: true}));
+      }
+    }, 40);
   }
 
   function getIdFrom(el) {
@@ -57,7 +85,6 @@
     const rarityClass = (el.className.match(/artifact_(\w+)/)||[])[1] || '';
     const stars = qa(CONFIG.starsSel, el).length;
     const key = [img, level, rarityClass, stars, el.innerText.slice(0,200)].join('|');
-    // hash simples
     let h = 0; for (let i=0;i<key.length;i++) { h = (h*31 + key.charCodeAt(i))|0; }
     return `pseudo_${Math.abs(h)}`;
   }
@@ -95,7 +122,7 @@
     };
   }
 
-  function sample() {
+  function sampleOnce() {
     const cards = qa(CONFIG.itemSelector);
     let added = 0;
     for (const c of cards) {
@@ -109,45 +136,39 @@
     return added;
   }
 
-  function updateHUD(container) {
+  function updateHUD(vp) {
     if (!S.hud) {
       const d = document.createElement('div');
       d.style.cssText = `
         position:fixed; right:12px; bottom:12px; z-index:999999;
-        background:rgba(20,20,30,.9); color:#fff; padding:10px 12px;
+        background:rgba(20,20,30,.92); color:#fff; padding:10px 12px;
         font:12px/1.2 system-ui,Segoe UI,Roboto; border-radius:8px; box-shadow:0 2px 8px rgba(0,0,0,.35);
       `;
       document.body.appendChild(d);
       S.hud = d;
     }
-    const total = S.data.size;
     S.hud.innerHTML = `
       <div><b>RAID Extractor</b> ${S.running ? (S.paused? '⏸️' : '▶️') : '⏹️'}</div>
-      <div>Itens coletados: <b>${total}</b></div>
+      <div>Itens coletados: <b>${S.data.size}</b></div>
       <div>Idle cycles: ${S.idleCycles}/${CONFIG.idleCyclesToStop}</div>
-      <div>Scroll: ${Math.round(container.scrollTop)} / ${container.scrollHeight - container.clientHeight}</div>
+      <div>ScrollTop: ${Math.round(vp.scrollTop)} / ${Math.max(0, vp.scrollHeight - vp.clientHeight)}</div>
       <div style="margin-top:6px;">
         <button id="_rx_pause">Pausar</button>
         <button id="_rx_resume">Retomar</button>
         <button id="_rx_stop">Parar+Exportar</button>
       </div>
     `;
-    // wire buttons once
     q('#_rx_pause')?.addEventListener('click', pause, {once:true});
     q('#_rx_resume')?.addEventListener('click', resume, {once:true});
     q('#_rx_stop')?.addEventListener('click', stopAndExport, {once:true});
   }
 
-  function tick(container) {
+  function tick(vp) {
     if (!S.running || S.paused) return;
-    const added = sample();
-    if (CONFIG.debug && added) console.log('[extract] +', added, 'total', S.data.size);
 
-    if (added === 0) {
-      S.idleCycles++;
-    } else {
-      S.idleCycles = 0;
-    }
+    const added = sampleOnce();
+    if (CONFIG.debug && added) console.log('[extract] +', added, 'total', S.data.size);
+    S.idleCycles = added ? 0 : (S.idleCycles + 1);
 
     // Auto-stop se não aparecer item novo por X ciclos
     if (S.idleCycles >= CONFIG.idleCyclesToStop) {
@@ -155,9 +176,9 @@
       return;
     }
 
-    // rola
-    container.scrollBy({ top: CONFIG.scrollStep, behavior: 'smooth' });
-    updateHUD(container);
+    // rola usando estratégia robusta
+    doScroll(vp, CONFIG.scrollStep);
+    updateHUD(vp);
   }
 
   function exportJSON() {
@@ -175,7 +196,7 @@
     ];
     for (const it of S.data.values()) {
       const s = it.substats || [];
-      const line = [
+      rows.push([
         it.id, it.set, it.slot, it.rarity, it.stars, it.level,
         it.main_stat?.stat || '', it.main_stat?.value ?? '', it.main_stat?.isPct ?? '',
         s[0]?.stat||'', s[0]?.value??'', s[0]?.isPct??'', s[0]?.rolls??'',
@@ -183,8 +204,7 @@
         s[2]?.stat||'', s[2]?.value??'', s[2]?.isPct??'', s[2]?.rolls??'',
         s[3]?.stat||'', s[3]?.value??'', s[3]?.isPct??'', s[3]?.rolls??'',
         it.rating_now||'', it.rating_max||'', it.imgSrc||''
-      ];
-      rows.push(line);
+      ]);
     }
     const csv = rows.map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(',')).join('\n');
     const blob = new Blob([csv], {type:'text/csv'});
@@ -195,7 +215,11 @@
   }
 
   function pause() { S.paused = true; }
-  function resume() { S.paused = false; S.idleCycles = 0; loop(); }
+  function resume() { 
+    if (!S.running) return;
+    S.paused = false; S.idleCycles = 0;
+    loop();
+  }
   function stopAndExport() {
     S.running = false;
     clearInterval(S.timer); S.timer = null;
@@ -206,9 +230,9 @@
 
   function loop() {
     if (S.timer) clearInterval(S.timer);
-    const container = findScrollContainer();
-    updateHUD(container);
-    S.timer = setInterval(()=>tick(container), CONFIG.tickMs);
+    const vp = getViewport();
+    updateHUD(vp);
+    S.timer = setInterval(()=>tick(vp), CONFIG.tickMs);
   }
 
   // ====== PUBLIC API ======
