@@ -543,33 +543,91 @@
       }
     }
 
-    // CSVs (revisado 1:1 + summary)
-    const invCsv = toCSV([
-      ['id','seq','set','setCode','slot','level','rarity','main','main_val','subs','action_super','action_end','action_mid','winner_tier','auto_action','reserved_by_set','set_completion_tag','selected_for_sell','keep_override','notes'],
-      ...items.map(it=>[
-        it.id, it.seq, it.set, it.setCode??'', it.slot, it.level, it.rarity,
-        it.main?.stat||'', it.main?.value??'',
-        (it.subs||[]).map(s=>`${s.stat}:${s.value}`).join('; '),
-        it.action_super, it.action_end, it.action_mid,
-        it.winner_tier, it.auto_action, it.reserved_by_set, it.set_completion_tag,
-        it.selected_for_sell, it.keep_override, it.notes
-      ])
-    ]);
+    // --- após calcular `items`, `entries`, `entriesByCode`, pools, reservas, etc. ---
+// Monta um header padronizado (o mesmo que você passou)
+const REVIEW_HEADER = [
+  'id','seq','set','slot','rarity','stars','level',
+  'main_stat','main_val','main_isPct',
+  'sub1','sub1_val','sub1_isPct','sub1_rolls',
+  'sub2','sub2_val','sub2_isPct','sub2_rolls',
+  'sub3','sub3_val','sub3_isPct','sub3_rolls',
+  'sub4','sub4_val','sub4_isPct','sub4_rolls',
+  'rating_now','rating_max','imgSrc',
+  // as próximas duas colunas existem no seu header (main_val repetido + subs agregados)
+  'main_val','subs',
+  // decisões em cascata
+  'action_super','action_end','action_mid','winner_tier','auto_action',
+  // prioridade por config
+  'Priority_Set',
+  // reservas e decisão final
+  'reserved_by_set','set_completion_tag','selected_for_sell','keep_override','notes'
+];
 
-    const summaryCsv = toCSV([
-      ['set','perfil','target','fechados_Splus','fechados_S','fechados_Mid','deficits'],
-      ...summaries.map(s=>[s.set,s.perfil,s.target,s.fechados_Splus,s.fechados_S,s.fechados_Mid,s.deficits])
-    ]);
+// helper: substats separados + string agregada
+function splitSubs(it) {
+  const s = it.subs || [];
+  const ss = (i, key) => (s[i] ? (key==='stat'? s[i].stat : key==='val'? s[i].value : key==='isPct'? (s[i].isPct?1:0) : key==='rolls'? (s[i].rolls||0) : '') : '');
+  const subsStr = s.map(x => `${x.stat}:${x.value}`).join('; ');
+  return {
+    sub1: ss(0,'stat'), sub1_val: ss(0,'val'), sub1_isPct: ss(0,'isPct'), sub1_rolls: ss(0,'rolls'),
+    sub2: ss(1,'stat'), sub2_val: ss(1,'val'), sub2_isPct: ss(1,'isPct'), sub2_rolls: ss(1,'rolls'),
+    sub3: ss(2,'stat'), sub3_val: ss(2,'val'), sub3_isPct: ss(2,'isPct'), sub3_rolls: ss(2,'rolls'),
+    sub4: ss(3,'stat'), sub4_val: ss(3,'val'), sub4_isPct: ss(3,'isPct'), sub4_rolls: ss(3,'rolls'),
+    subsStr
+  };
+}
 
-    // logs para o painel
-    const log = [];
-    if (warnNoSet.length) log.push(`⚠️ Itens sem SET detectado (amostra): ${warnNoSet.join(', ')}`);
-    if (warnNoSlot.length) log.push(`⚠️ Itens sem SLOT detectado (amostra): ${warnNoSlot.join(', ')}`);
-    if (unknownCodes.size) log.push(`ℹ️ Sets sem setCode mapeado: ${Array.from(unknownCodes).slice(0,10).join(', ')}...`);
-    log.push(`Itens extraídos: ${inventory.length} | Revisado: ${items.length} (deve bater)`);
+// marcação de prioridade por CONFIG (por code)
+const priorityCodeSet = new Set(entries.map(e => String(e.code)));
 
-    return { summaryCsv, inventoryCsv: invCsv, items, summaries, log: log.join('\n') };
-  }
+function rowFromItem(it) {
+  const { sub1,sub1_val,sub1_isPct,sub1_rolls,
+          sub2,sub2_val,sub2_isPct,sub2_rolls,
+          sub3,sub3_val,sub3_isPct,sub3_rolls,
+          sub4,sub4_val,sub4_isPct,sub4_rolls,
+          subsStr } = splitSubs(it);
+
+  const priority = it.setCode!=null && priorityCodeSet.has(String(it.setCode)) ? 'TRUE' : '';
+
+  // OBS: `main_stat` mantém o nome original da coleta.
+  //      O header pede `main_val` duas vezes: preenchemos as duas.
+  return [
+    it.id, it.seq, it.set, it.slot, it.rarity, '', it.level,
+    it.main?.stat || '', it.main?.value ?? '', it.main?.isPct ? 1 : 0,
+    sub1, sub1_val, sub1_isPct, sub1_rolls,
+    sub2, sub2_val, sub2_isPct, sub2_rolls,
+    sub3, sub3_val, sub3_isPct, sub3_rolls,
+    sub4, sub4_val, sub4_isPct, sub4_rolls,
+    it.rating_now || '', it.rating_max || '', it.imgSrc || '',
+    // main_val (duplicado no header):
+    it.main?.value ?? '',
+    // subs agregados:
+    subsStr,
+    // decisões:
+    it.action_super, it.action_end, it.action_mid, it.winner_tier, it.auto_action,
+    // prioridade:
+    priority,
+    // reservas e flags finais:
+    it.reserved_by_set, it.set_completion_tag, it.selected_for_sell, it.keep_override, it.notes
+  ];
+}
+
+// GARANTE mesma ordem e mesma quantidade da coleta (ordena por seq)
+const orderedItems = items.slice().sort((a,b)=>a.seq-b.seq);
+
+// CSV revisado 1:1
+const invRows = [REVIEW_HEADER];
+for (const it of orderedItems) invRows.push(rowFromItem(it));
+const inventoryCsv = toCSV(invRows);
+
+// summary.csv fica igual ao já gerado antes:
+const summaryCsv = toCSV([
+  ['set','perfil','target','fechados_Splus','fechados_S','fechados_Mid','deficits'],
+  ...summaries.map(s=>[s.set,s.perfil,s.target,s.fechados_Splus,s.fechados_S,s.fechados_Mid,s.deficits])
+]);
+
+return { summaryCsv, inventoryCsv, items: orderedItems, summaries };
+
 
   // ==============================
   // UI PAINEL
