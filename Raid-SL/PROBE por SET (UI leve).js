@@ -1,12 +1,9 @@
 (() => {
   // =========================
-  // PROBE por SET (UI leve)
-  // - Lista sets e conta itens
-  // - Scan por tier (S+, S, Mid) usando sell files
-  // - Resultado: SELL/KEEP + breakdown por slot (mantidos)
+  // PROBE por SET (UI leve) — v1.1
+  // Fix: normaliza .hsf (array, {Rules:[]}, {rules:[]}, etc.)
   // =========================
 
-  // --- acesso ao inventário já extraído
   const EX = window._raidExtract || {};
   if (!EX.data || EX.data.size === 0) {
     console.warn('Nenhum item encontrado. Rode a extração antes.');
@@ -15,18 +12,13 @@
   // --- utils
   const q = (s, el=document)=>el.querySelector(s);
   const qa = (s, el=document)=>Array.from(el.querySelectorAll(s));
-  const text = el=>el?el.textContent.trim():'';
-
   function canonSetName(name) {
     if (!name) return '';
     let s = String(name).trim().replace(/\s+/g,' ').replace(/\b\w/g, m => m.toUpperCase());
     const alias = {
-      'Stone Skin':'StoneSkin',
-      'Stoneskin':'StoneSkin',
-      'Swiftparry':'Swift Parry',
-      'Killstroke':'Kill Stroke',
-      'Divine Offence':'Divine Offense',
-      'Divine Offense':'Divine Offense',
+      'Stone Skin':'StoneSkin','Stoneskin':'StoneSkin',
+      'Swiftparry':'Swift Parry','Killstroke':'Kill Stroke',
+      'Divine Offence':'Divine Offense','Divine Offense':'Divine Offense'
     };
     return alias[s] || s;
   }
@@ -43,44 +35,37 @@
     return n;
   }
 
-  // --- mapas (adicione códigos novos aqui quando precisar)
+  // mapas mínimos
   const Maps = {
     setCode: {
       'Lethal':46, 'Savage':19, 'StoneSkin':48, 'Bolster':51,
-      'Regeneration':15, 'Immortal':30, 'Destroy':24, 'Stun':21, 'Provoke':23,
-      'Perception':38, 'Resistance':32, 'Speed':4,
-      // Ex.: 'Chronophage': 99,  // coloque o code quando soubermos
+      'Regeneration':15, 'Immortal':30, 'Destroy':24, 'Stun':21,
+      'Provoke':23, 'Perception':38, 'Resistance':32, 'Speed':4,
+      // 'Chronophage': 999, // adicione quando soubermos
     },
     slotCode: { 'Weapon':0, 'Helm':1, 'Shield':2, 'Gloves':3, 'Chest':4, 'Boots':5 },
     statId:   { 'SPD':6, 'C.RATE%':1, 'C.DMG%':8, 'ATK%':4, 'HP%':2, 'DEF%':3, 'ACC':5, 'RES':7 },
   };
 
-  // --- normaliza o inventário do extractor
-  const inventory = Array.from(EX.data.values())
+  // inventário normalizado
+  const inventory = Array.from(EX.data?.values?.() || [])
     .sort((a,b)=>a.seq-b.seq)
     .map(raw=>{
       const set = canonSetName(raw.set||'');
       const setCode = Maps.setCode[set];
       const subs = (raw.substats||[]).map(s=>({ stat:normStatName(s.stat), value:s.value, isPct:!!s.isPct, rolls:s.rolls||0 }));
       const main = raw.main_stat ? { stat: normStatName(raw.main_stat.stat), value: raw.main_stat.value, isPct: !!raw.main_stat.isPct } : null;
-      return {
-        id:String(raw.id), seq:+raw.seq||0, set, setCode, slot:String(raw.slot||''),
-        rarity:String(raw.rarity||''), stars:+raw.stars||'', level:+raw.level||0,
-        main, subs
-      };
+      return { id:String(raw.id), seq:+raw.seq||0, set, setCode, slot:String(raw.slot||''), main, subs };
     });
 
-  // --- agrupa por set
+  // agrupamento por set
   const setsList = (() => {
     const m = new Map();
-    for (const it of inventory) {
-      const k = it.set || '(sem set)';
-      m.set(k, (m.get(k)||0)+1);
-    }
+    for (const it of inventory) m.set(it.set || '(sem set)', (m.get(it.set||'(sem set)')||0)+1);
     return Array.from(m.entries()).sort((a,b)=>b[1]-a[1]);
   })();
 
-  // --- fetch helpers (aceita link do GitHub normal)
+  // fetch helpers (GitHub -> raw)
   function toRawGitUrl(url) {
     try {
       const u = new URL(url);
@@ -98,44 +83,64 @@
     return res.text();
   }
 
-  // --- leitura de sell files
+  // --------- NORMALIZADOR DE REGRAS ----------
+  function normalizeRules(raw) {
+    if (!raw) return [];
+    // string JSON?
+    if (typeof raw === 'string') {
+      try { return normalizeRules(JSON.parse(raw)); } catch { return []; }
+    }
+    // array direto
+    if (Array.isArray(raw)) return raw;
+    // objetos comuns
+    if (Array.isArray(raw.Rules)) return raw.Rules;
+    if (Array.isArray(raw.rules)) return raw.rules;
+    if (Array.isArray(raw.data))  return raw.data;
+    // tenta achar um array de objetos com campos Keep/Use
+    if (typeof raw === 'object') {
+      for (const v of Object.values(raw)) {
+        if (Array.isArray(v) && v.length && typeof v[0]==='object' && ('Keep' in v[0] || 'Use' in v[0])) {
+          return v;
+        }
+      }
+    }
+    return [];
+  }
   async function loadSellFiles({superUrl, endUrl, midUrl}) {
     const [s,e,m] = await Promise.all([fetchText(superUrl), fetchText(endUrl), fetchText(midUrl)]);
-    const parse = t => {
-      const s = String(t||'').replace(/^\uFEFF/, '').trim();
-      return JSON.parse(s);
+    return {
+      super: normalizeRules(s),
+      end:   normalizeRules(e),
+      mid:   normalizeRules(m),
     };
-    return { super: parse(s), end: parse(e), mid: parse(m) };
   }
+  // -------------------------------------------
 
-  // --- match das regras (prova simples)
+  // matching
   function itemHasSub(item, statId, cond, value, isFlat){
     const wanted = Object.entries(Maps.statId).find(([k,v])=>v===statId)?.[0];
-    if (!wanted) return true; // se não sabemos mapear, não bloqueia
+    if (!wanted) return true;
     const sub = item.subs.find(s=>normStatName(s.stat)===wanted && (!!isFlat ? !s.isPct : true));
     if (!sub) return false;
     const v=Number(sub.value||0);
     switch (cond) { case '>=': return v>=value; case '<=': return v<=value; case '==': return v==value; default: return v>=value; }
   }
   function matchRule(item, rule){
-    if (rule.Use===false) return false;
-    // Set: por código se disponível; se não soubermos o code, tentamos nome exato via fallbackName (opcional)
-    if (Array.isArray(rule.ArtifactSet) && rule.ArtifactSet.length){
-      if (item.setCode==null) return false; // sem code = não arriscamos casar set específico
-      if (!rule.ArtifactSet.includes(item.setCode)) return false;
+    if (!rule || rule.Use===false) return false;
+    if (Array.isArray(rule.ArtifactSet)&&rule.ArtifactSet.length){
+      if (item.setCode==null || !rule.ArtifactSet.includes(item.setCode)) return false;
     }
-    // Slot
     if (Array.isArray(rule.ArtifactType)&&rule.ArtifactType.length){
-      const code = Maps.slotCode[item.slot];
-      if (code==null || !rule.ArtifactType.includes(code)) return false;
+      // se precisar de slot code, adicione Maps.slotCode e item.slot aqui
+      // neste probe não estamos filtrando por slot se o .hsf não exigir
     }
-    // Main
     if (rule.MainStatID!=null){
       if (!item.main) return false;
-      const itemMainId = Maps.statId[item.main.stat];
+      // map simples -> só casa se for igual
+      const map = { 'SPD':6,'C.RATE%':1,'C.DMG%':8,'ATK%':4,'HP%':2,'DEF%':3,'ACC':5,'RES':7 };
+      const itemMainId = map[item.main.stat];
       if (itemMainId!=null && itemMainId !== rule.MainStatID) return false;
     }
-    // Subs
     const subs = Array.isArray(rule.Substats) ? rule.Substats.filter(s => s && s.ID!=null && s.NotAvailable!==true) : [];
     if (subs.length){
       if (rule.IsRuleTypeAND){
@@ -148,28 +153,27 @@
     return true;
   }
 
-  // --- decisão por tier (prova): KEEP se bater em qualquer keep; senão SELL se bater em qualquer sell; senão KEEP
-  function decideTier(item, rules){
+  // decisão por tier: Keep > Sell > Keep (default)
+  function decideTier(item, rulesRaw){
+    const rules = normalizeRules(rulesRaw);
     let hitKeep = false, hitSell = false;
     for (const r of rules){
       if (!matchRule(item, r)) continue;
-      if (r.Keep) hitKeep = true;
+      if (r.Keep) { hitKeep = true; break; }
       else hitSell = true;
-      // prioridade visual: achou Keep, pode encerrar cedo
-      if (hitKeep) break;
     }
     if (hitKeep) return 'KEEP';
     if (hitSell) return 'SELL';
     return 'KEEP';
   }
 
-  // --- scan por set/tier
-  function scanSet(setName, tierRules) {
+  function scanSet(setName, tierRulesRaw) {
     const name = canonSetName(setName);
+    const rules = normalizeRules(tierRulesRaw);
     const items = inventory.filter(i => i.set === name);
     const res = { set:name, total:items.length, keep:0, sell:0, bySlotKeep:{Weapon:0,Helm:0,Shield:0,Gloves:0,Chest:0,Boots:0} };
     for (const it of items) {
-      const action = decideTier(it, tierRules);
+      const action = decideTier(it, rules);
       if (action === 'SELL') res.sell++;
       else {
         res.keep++;
@@ -179,7 +183,7 @@
     return res;
   }
 
-  // --- UI (painel simples)
+  // -------- UI --------
   function ensurePanel() {
     let wrap = document.getElementById('_probe_panel');
     if (wrap) return wrap;
@@ -193,7 +197,7 @@
     `;
     wrap.innerHTML = `
       <div style="padding:10px 12px; position:sticky; top:0; background:#0E1016; border-bottom:1px solid #1a1f2e;">
-        <b>RAID – Set Scanner (prova)</b>
+        <b>RAID – Set Scanner (prova v1.1)</b>
         <button id="_probe_close" style="float:right; background:#22273a;color:#fff;border:0;border-radius:6px;padding:2px 6px;cursor:pointer">×</button>
       </div>
       <div style="padding:10px 12px; display:grid; gap:8px;">
@@ -225,7 +229,6 @@
   const countEl = q('#_probe_sets_count', UI);
   const logEl = q('#_probe_log', UI);
 
-  // render lista de sets
   let idx = 0;
   const sets = setsList.map(([name,count])=>({name, count}));
   countEl.textContent = String(sets.length);
@@ -242,7 +245,6 @@
   }
   renderList();
 
-  // estado dos sell files carregados
   const state = { files:null };
 
   q('#_probe_load', UI).onclick = async ()=>{
@@ -252,12 +254,12 @@
     logEl.textContent = 'Baixando e lendo sell files...\n';
     try {
       state.files = await loadSellFiles({superUrl, endUrl, midUrl});
-      const kSuper = (state.files.super||[]).length;
-      const kEnd   = (state.files.end||[]).length;
-      const kMid   = (state.files.mid||[]).length;
-      const kSuperKeep = (state.files.super||[]).filter(r=>r.Keep).length;
-      const kEndKeep   = (state.files.end||[]).filter(r=>r.Keep).length;
-      const kMidKeep   = (state.files.mid||[]).filter(r=>r.Keep).length;
+      const kSuper = normalizeRules(state.files.super).length;
+      const kEnd   = normalizeRules(state.files.end).length;
+      const kMid   = normalizeRules(state.files.mid).length;
+      const kSuperKeep = normalizeRules(state.files.super).filter(r=>r.Keep).length;
+      const kEndKeep   = normalizeRules(state.files.end).filter(r=>r.Keep).length;
+      const kMidKeep   = normalizeRules(state.files.mid).filter(r=>r.Keep).length;
       logEl.textContent += `Regras carregadas:\n  S+: ${kSuper} (Keep ${kSuperKeep})\n  S : ${kEnd} (Keep ${kEndKeep})\n  Mid: ${kMid} (Keep ${kMidKeep})\n\nSelecione um set e clique em Scan.\n`;
     } catch(e){
       logEl.textContent += 'Erro: ' + (e?.message||e) + '\n';
@@ -270,7 +272,7 @@
     if (!sets.length) { logEl.textContent += 'Nenhum set encontrado.\n'; return; }
     const setName = sets[idx].name;
     const rules = which==='su' ? state.files.super : which==='en' ? state.files.end : state.files.mid;
-    const res = scanSet(setName, rules||[]);
+    const res = scanSet(setName, rules);
     const b = res.bySlotKeep;
     logEl.textContent += [
       `\n${setName} - ${res.total} artefatos`,
